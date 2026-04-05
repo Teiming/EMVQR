@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="viewport-fit=cover,width=device-width,user-scalable=no" />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        color: white;
+        font-family: -apple-system, sans-serif;
+      }
+      :root {
+        background-color: #333;
+      }
+
+      body {
+        max-width: 30rem;
+        margin: auto;
+      }
+      textarea {
+        width: 100%;
+        height: 8rem;
+        background-color: #888;
+        border: 1px solid #4a0;
+        border-radius: 0.5rem;
+        font-size: 1rem;
+        padding: 0.5rem;
+      }
+      div {
+        padding: 0.2rem;
+        border-radius: 0.2rem;
+        overflow: scroll;
+      }
+      div:has(div) {
+        padding: 0.1rem;
+      }
+      div.row {
+        display: flex;
+        gap: 0.2rem;
+        > div:first-child {
+          width: 3rem;
+          flex-shrink: 0;
+          background-color: #4a0;
+          color: black;
+        }
+      }
+    </style>
+    <title>EMV QR</title>
+  </head>
+  <body>
+    <textarea name="base64" id="t1"></textarea>
+    <!-- <textarea name="hex" id="t2" disabled></textarea> -->
+    <article id="t3">
+      <div class="row">
+        <div>85</div>
+        <div id="d85"></div>
+      </div>
+      <div class="row">
+        <div>61</div>
+        <div>
+          <div class="row">
+            <div>4F</div>
+            <div id="d4F"></div>
+          </div>
+          <div class="row">
+            <div>57</div>
+            <div id="d57"></div>
+          </div>
+          <div class="row">
+            <div>5F34</div>
+            <div id="d5F34"></div>
+          </div>
+          <div class="row">
+            <div>9F60</div>
+            <div id="d9F60"></div>
+          </div>
+          <div class="row">
+            <div>63</div>
+            <div>
+              <div class="row">
+                <div>9F26</div>
+                <div id="d9F26"></div>
+              </div>
+              <div class="row">
+                <div>9F27</div>
+                <div id="d9F27"></div>
+              </div>
+              <div class="row">
+                <div>9F10</div>
+                <div id="d9F10"></div>
+              </div>
+              <div class="row">
+                <div>9F36</div>
+                <div id="d9F36"></div>
+              </div>
+              <div class="row">
+                <div>82</div>
+                <div id="d82"></div>
+              </div>
+              <div class="row">
+                <div>9F37</div>
+                <div id="d9F37"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <script>
+      const t1 = document.querySelector('#t1')
+      const t2 = document.querySelector('#t2')
+      const t3 = document.querySelector('#t3')
+      t1.addEventListener('input', e => {
+        const binary = atob(e.target.value)
+        let hex = ''
+        for (let i = 0; i < binary.length; i++) {
+          const byte = binary.charCodeAt(i)
+          hex += byte.toString(16).padStart(2, '0')
+        }
+
+        function hexToBytes(hex) {
+          const clean = hex.replace(/\s+/g, '').toUpperCase()
+          const bytes = []
+          for (let i = 0; i < clean.length; i += 2) {
+            bytes.push(parseInt(clean.slice(i, i + 2), 16))
+          }
+          return bytes
+        }
+        function bytesToHex(bytes) {
+          return bytes
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('')
+            .toUpperCase()
+        }
+        function readTag(bytes, offset) {
+          const tagBytes = [bytes[offset++]]
+          if ((tagBytes[0] & 0x1f) === 0x1f) {
+            while (offset < bytes.length) {
+              const b = bytes[offset++]
+              tagBytes.push(b)
+
+              if ((b & 0x80) === 0) {
+                break
+              }
+            }
+            const last = tagBytes[tagBytes.length - 1]
+          }
+
+          return {
+            tagBytes,
+            tagHex: bytesToHex(tagBytes),
+            offset,
+          }
+        }
+
+        function readLength(bytes, offset) {
+          const first = bytes[offset++]
+          if ((first & 0x80) === 0) {
+            return {
+              length: first,
+              lengthBytes: [first],
+              offset,
+            }
+          }
+          const numOctets = first & 0x7f
+          let length = 0
+          const lengthBytes = [first]
+
+          for (let i = 0; i < numOctets; i++) {
+            const b = bytes[offset++]
+            lengthBytes.push(b)
+            length = (length << 8) | b
+          }
+
+          return {
+            length,
+            lengthBytes,
+            offset,
+          }
+        }
+
+        function isConstructedTag(firstTagByte) {
+          return (firstTagByte & 0x20) !== 0
+        }
+
+        function parseTlv(bytes, start = 0, end = bytes.length) {
+          const result = []
+          let offset = start
+
+          while (offset < end) {
+            const tagInfo = readTag(bytes, offset)
+            offset = tagInfo.offset
+
+            const lengthInfo = readLength(bytes, offset)
+            offset = lengthInfo.offset
+
+            const valueStart = offset
+            const valueEnd = offset + lengthInfo.length
+
+            const valueBytes = bytes.slice(valueStart, valueEnd)
+            offset = valueEnd
+
+            const node = {
+              tag: tagInfo.tagHex,
+              length: lengthInfo.length,
+              valueHex: bytesToHex(valueBytes),
+              constructed: isConstructedTag(tagInfo.tagBytes[0]),
+            }
+
+            if (node.constructed) {
+              node.children = parseTlv(valueBytes, 0, valueBytes.length)
+            }
+
+            result.push(node)
+          }
+
+          return result
+        }
+
+        function parseTlvFromHex(hex) {
+          const bytes = hexToBytes(hex)
+          return parseTlv(bytes)
+        }
+
+        const result = parseTlvFromHex(hex)
+        // t2.innerHTML = JSON.stringify(result)
+
+        result.forEach(({ tag, valueHex, children }) => {
+          function hexToAscii(hex) {
+            let result = ''
+            for (let i = 0; i < hex.length; i += 2) {
+              const byte = hex.slice(i, i + 2)
+              result += String.fromCharCode(parseInt(byte, 16))
+            }
+            return result
+          }
+          if (tag == '85') {
+            document.querySelector('#d85').innerHTML = hexToAscii(valueHex)
+          } else {
+            children.forEach(({ tag, valueHex, children }) => {
+              tag == '4F' ? (document.querySelector('#d4F').innerHTML = valueHex) : false
+              tag == '57' ? (document.querySelector('#d57').innerHTML = valueHex) : false
+              tag == '5F34' ? (document.querySelector('#d5F34').innerHTML = valueHex) : false
+              tag == '9F60' ? (document.querySelector('#d9F60').innerHTML = valueHex) : false
+              tag == '63'
+                ? children.forEach(({ tag, valueHex }) => {
+                    tag == '9F26' ? (document.querySelector('#d9F26').innerHTML = valueHex) : false
+                    tag == '9F27' ? (document.querySelector('#d9F27').innerHTML = valueHex) : false
+                    tag == '9F10' ? (document.querySelector('#d9F10').innerHTML = valueHex) : false
+                    tag == '9F36' ? (document.querySelector('#d9F36').innerHTML = valueHex) : false
+                    tag == '82' ? (document.querySelector('#d82').innerHTML = valueHex) : false
+                    tag == '9F37' ? (document.querySelector('#d9F37').innerHTML = valueHex) : false
+                  })
+                : false
+            })
+          }
+        })
+      })
+    </script>
+  </body>
+</html>
